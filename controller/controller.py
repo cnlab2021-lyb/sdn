@@ -97,6 +97,7 @@ class Switch(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
+        arp_pkt = pkt.get_protocol(arp.arp)
 
         dst = eth.dst
         src = eth.src
@@ -105,7 +106,11 @@ class Switch(app_manager.RyuApp):
         if ipv4_pkt:
             vlan_src = int(ipv4_pkt.src.split('.')[3]) % 2
             vlan_dst = int(ipv4_pkt.dst.split('.')[3]) % 2
-            drop = vlan_src != vlan_dst
+            drop |= vlan_src != vlan_dst
+        if arp_pkt:
+            vlan_src = int(arp_pkt.src_ip.split('.')[3]) % 2
+            vlan_dst = int(arp_pkt.dst_ip.split('.')[3]) % 2
+            drop |= vlan_src != vlan_dst
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
