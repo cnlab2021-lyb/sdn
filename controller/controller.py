@@ -38,6 +38,7 @@ class Switch(app_manager.RyuApp):
         self.datapaths = set()
         self.monitor_thread = hub.spawn(self.monitor)
         self.flow_stats = collections.defaultdict(list)
+        self.prev_stats = {}
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -204,7 +205,12 @@ class Switch(app_manager.RyuApp):
         for row in rows:
             self.logger.info(row_format.format(*row))
 
+    def on_detect_congestion(self, datapath, stat):
+        # TODO: Re-route
+        self.logger.info(f"Detect congestion: datapath = {datapath}, stat = {stat}")
+
     def monitor(self):
+        CONGESTION_THRESHOLD = 1024 * 1024 * 10
         while True:
             for datapath in self.datapaths:
                 parser = datapath.ofproto_parser
@@ -227,15 +233,21 @@ class Switch(app_manager.RyuApp):
                 for stat in datapath_stats:
                     if len(stat.instructions[0].actions) == 0:
                         continue
-                    rows.append([
-                        datapath,
+                    key = (
                         stat.match['in_port'],
                         stat.match.get('ipv4_src', stat.match.get('ipv6_src', stat.match.get('arp_spa', ''))),
                         stat.match.get('tcp_src', stat.match.get('udp_src', '')),
                         stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
                         stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
                         self._get_protocol(stat.match),
-                        stat.instructions[0].actions[0].port,
+                        stat.instructions[0].actions[0].port
+                    )
+                    if key in self.prev_stats and stat.byte_count - self.prev_stats[key] > CONGESTION_THRESHOLD:
+                        self.on_detect_congestion(datapath, key)
+                    self.prev_stats[key] = stat.byte_count
+                    rows.append([
+                        datapath,
+                        *key,
                         stat.packet_count,
                         stat.byte_count
                     ])
