@@ -126,6 +126,9 @@ class SimpleSwitch13(app_manager.RyuApp):
                     args['ipv6_src'] = p.src
                     args['ipv6_dst'] = p.dst
                     priority += 1
+                elif p.protocol_name == 'arp':
+                    args['arp_spa'] = p.src_ip
+                    args['arp_tpa'] = p.dst_ip
                 elif p.protocol_name == 'tcp':
                     args['tcp_src'] = p.src_port
                     args['tcp_dst'] = p.dst_port
@@ -196,9 +199,9 @@ class SimpleSwitch13(app_manager.RyuApp):
                     rows.append([
                         datapath,
                         stat.match['in_port'],
-                        stat.match.get('ipv4_src', stat.match.get('ipv6_src', '')),
+                        stat.match.get('ipv4_src', stat.match.get('ipv6_src', stat.match.get('arp_spa', ''))),
                         stat.match.get('tcp_src', stat.match.get('udp_src', '')),
-                        stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', '')),
+                        stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
                         stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
                         self._get_protocol(stat.match),
                         stat.instructions[0].actions[0].port,
