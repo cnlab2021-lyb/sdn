@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
+
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.ofproto.ofproto_v1_3 import OXM_OF_IPV4_SRC, OXM_OF_IPV4_DST
@@ -33,62 +35,9 @@ class Switch(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(Switch, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.datapaths = {}
-        self.monitor_thread = hub.spawn(self._monitor)
-
-    def _send_desc_reqeust(self, datapath):
-        ofp_parser = datapath.ofproto_parser
-        req = ofp_parser.OFPDescStatsRequest(datapath, 0)
-        datapath.send_msg(req)
-
-
-
-    @set_ev_cls(ofp_event.EventOFPStateChange,
-                [MAIN_DISPATCHER, DEAD_DISPATCHER])
-    def _state_change_handler(self, ev):
-        datapath = ev.datapath
-        if ev.state == MAIN_DISPATCHER:
-            if datapath.id not in self.datapaths:
-                self.logger.debug('register datapath: %016x', datapath.id)
-                self.datapaths[datapath.id] = datapath
-                # self._send_desc_request(datapath)
-        elif ev.state == DEAD_DISPATCHER:
-            if datapath.id in self.datapaths:
-                self.logger.debug('unregister datapath: %016x', datapath.id)
-                del self.datapaths[datapath.id]
-        
-    def _request_stat(self, datapath):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        # match = parser.OFPMatch(ipv4_src=None, ipv4_dst=None, tcp_src=None, udp_src=None)
-        req = parser.OFPFlowStatsRequest(datapath)
-        datapath.send_msg(req)
-
-    def _monitor(self):
-        while True:
-            for dp in self.datapaths.values():
-                self._request_stat(dp)
-            hub.sleep(10)
-
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
-    def _flow_stats_reply_handler(self, ev):
-        body = ev.msg.body
-        print(body)
-
-        # self.logger.info('datapath         '
-        #                  'in-port  eth-dst           '
-        #                  'out-port packets  bytes')
-        # self.logger.info('---------------- '
-        #                  '-------- ----------------- '
-        #                  '-------- -------- --------')
-        # for stat in sorted([flow for flow in body if flow.priority == 1],
-        #                    key=lambda flow: (flow.match['in_port'],
-        #                                      flow.match['eth_dst'])):
-        #     self.logger.info('%016x %8x %17s %8x %8d %8d',
-        #                      ev.msg.datapath.id,
-        #                      stat.match['in_port'], stat.match['eth_dst'],
-        #                      stat.instructions[0].actions[0].port,
-        #                      stat.packet_count, stat.byte_count)
+        self.datapaths = set()
+        self.monitor_thread = hub.spawn(self.monitor)
+        self.flow_stats = collections.defaultdict(list)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -106,6 +55,7 @@ class Switch(app_manager.RyuApp):
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
+        self.datapaths.add(datapath)
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
@@ -151,7 +101,6 @@ class Switch(app_manager.RyuApp):
         dst = eth.dst
         src = eth.src
 
-        match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
         drop = False
         if ipv4_pkt:
             vlan_src = int(ipv4_pkt.src.split('.')[3]) % 2
@@ -162,11 +111,10 @@ class Switch(app_manager.RyuApp):
             # ignore lldp packet
             return
 
-        dpid = datapath.id
+        dpid = format(datapath.id, "d").zfill(16)
         self.mac_to_port.setdefault(dpid, {})
 
-        if not pkt.get_protocol(ipv6.ipv6):
-            self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -180,16 +128,46 @@ class Switch(app_manager.RyuApp):
 
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
+            args = {
+                'in_port': in_port,
+                'eth_dst': dst,
+                'eth_src': src,
+                'eth_type': eth.ethertype
+            }
+            priority = 1
+            for p in pkt:
+                if p.protocol_name == 'ipv4':
+                    args['ip_proto'] = p.proto
+                    args['ipv4_src'] = p.src
+                    args['ipv4_dst'] = p.dst
+                    priority += 1
+                elif p.protocol_name == 'ipv6':
+                    args['ip_proto'] = p.proto
+                    args['ipv6_src'] = p.src
+                    args['ipv6_dst'] = p.dst
+                    priority += 1
+                elif p.protocol_name == 'arp':
+                    args['arp_spa'] = p.src_ip
+                    args['arp_tpa'] = p.dst_ip
+                elif p.protocol_name == 'tcp':
+                    args['tcp_src'] = p.src_port
+                    args['tcp_dst'] = p.dst_port
+                    priority += 1
+                elif p.protocol_name == 'udp':
+                    args['udp_src'] = p.src_port
+                    args['udp_dst'] = p.dst_port
+                    priority += 1
+            match = parser.OFPMatch(**args)
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
             if drop:
-                self.drop_packets(datapath, 1, match)
+                self.drop_packets(datapath, priority, match)
             else:
                 if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                    self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                    self.add_flow(datapath, priority, match, actions, msg.buffer_id)
                     return
                 else:
-                    self.add_flow(datapath, 1, match, actions)
+                    self.add_flow(datapath, priority, match, actions)
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
@@ -198,3 +176,68 @@ class Switch(app_manager.RyuApp):
             out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                       in_port=in_port, actions=actions, data=data)
             datapath.send_msg(out)
+
+    @staticmethod
+    def _get_protocol(match):
+        if 'tcp_src' in match:
+            return 'TCP'
+        if 'udp_src' in match:
+            return 'UDP'
+        if match.get('ip_proto', -1) == 1:
+            return 'ICMP'
+        if match.get('eth_type', None) == ether_types.ETH_TYPE_ARP:
+            return 'ARP'
+        return 'Unknown'
+
+    def _print_table(self, rows):
+        assert len(rows) >= 1
+        lens = [len(x) for x in rows[0]]
+        for row in rows:
+            for i, cell in enumerate(row):
+                lens[i] = max(lens[i], len(str(cell)))
+        row_format = ''.join('{:>' + str(x + 5) + '}' for x in lens)
+        for row in rows:
+            self.logger.info(row_format.format(*row))
+
+    def monitor(self):
+        while True:
+            for datapath in self.datapaths:
+                parser = datapath.ofproto_parser
+                datapath.send_msg(parser.OFPFlowStatsRequest(datapath))
+            hub.sleep(10)
+            columns = [
+                'datapath',
+                'in-port',
+                'src-ip',
+                'src-port',
+                'dst-ip',
+                'dst-port',
+                'protocol',
+                'action',
+                'packets',
+                'bytes'
+            ]
+            rows = [columns]
+            for datapath, datapath_stats in self.flow_stats.items():
+                for stat in datapath_stats:
+                    if len(stat.instructions[0].actions) == 0:
+                        continue
+                    rows.append([
+                        datapath,
+                        stat.match['in_port'],
+                        stat.match.get('ipv4_src', stat.match.get('ipv6_src', stat.match.get('arp_spa', ''))),
+                        stat.match.get('tcp_src', stat.match.get('udp_src', '')),
+                        stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
+                        stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
+                        self._get_protocol(stat.match),
+                        stat.instructions[0].actions[0].port,
+                        stat.packet_count,
+                        stat.byte_count
+                    ])
+            self._print_table(rows)
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        self.flow_stats[ev.msg.datapath.id].clear()
+        for stat in [s for s in ev.msg.body if s.priority >= 1]:
+            self.flow_stats[ev.msg.datapath.id].append(stat)
