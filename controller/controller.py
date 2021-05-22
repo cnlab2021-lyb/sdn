@@ -205,16 +205,16 @@ class Switch(app_manager.RyuApp):
         for row in rows:
             self.logger.info(row_format.format(*row))
 
-    def on_detect_congestion(self, datapath, stat):
+    def on_detect_congestion(self, datapath, port):
         # TODO: Re-route
-        self.logger.info(f"Detect congestion: datapath = {datapath}, stat = {stat}")
+        self.logger.info(f"Detect congestion: datapath = {datapath}, port = {port}")
 
     def monitor(self):
-        CONGESTION_THRESHOLD = 1024 * 1024 * 10
         while True:
             for datapath in self.datapaths:
                 parser = datapath.ofproto_parser
                 datapath.send_msg(parser.OFPFlowStatsRequest(datapath))
+                datapath.send_msg(parser.OFPPortStatsRequest(datapath))
             hub.sleep(10)
             columns = [
                 'datapath',
@@ -233,21 +233,15 @@ class Switch(app_manager.RyuApp):
                 for stat in datapath_stats:
                     if len(stat.instructions[0].actions) == 0:
                         continue
-                    key = (
+                    rows.append([
+                        datapath,
                         stat.match['in_port'],
                         stat.match.get('ipv4_src', stat.match.get('ipv6_src', stat.match.get('arp_spa', ''))),
                         stat.match.get('tcp_src', stat.match.get('udp_src', '')),
                         stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
                         stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
                         self._get_protocol(stat.match),
-                        stat.instructions[0].actions[0].port
-                    )
-                    if key in self.prev_stats and stat.byte_count - self.prev_stats[key] > CONGESTION_THRESHOLD:
-                        self.on_detect_congestion(datapath, key)
-                    self.prev_stats[key] = stat.byte_count
-                    rows.append([
-                        datapath,
-                        *key,
+                        stat.instructions[0].actions[0].port,
                         stat.packet_count,
                         stat.byte_count
                     ])
@@ -258,3 +252,12 @@ class Switch(app_manager.RyuApp):
         self.flow_stats[ev.msg.datapath.id].clear()
         for stat in [s for s in ev.msg.body if s.priority >= 1]:
             self.flow_stats[ev.msg.datapath.id].append(stat)
+
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def _port_stats_reply_handler(self, ev):
+        CONGESTION_THRESHOLD = 10 * 1024 * 1024
+        for stat in ev.msg.body:
+            key = (ev.msg.datapath.id, stat.port_no)
+            if key in self.prev_stats and stat.tx_bytes - self.prev_stats[key] > CONGESTION_THRESHOLD:
+                self.on_detect_congestion(ev.msg.datapath, stat.port_no)
+            self.prev_stats[key] = stat.tx_bytes
