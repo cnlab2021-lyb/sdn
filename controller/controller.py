@@ -121,21 +121,32 @@ class Switch(app_manager.RyuApp):
         parser = datapath.ofproto_parser
 
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_CLEAR_ACTIONS, [])]
-        msg = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst)
+        msg = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=priority,
+            match=match,
+            instructions=inst)
         datapath.send_msg(msg)
 
     def _block_port(self, datapath, port_no):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV | ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
-        msg = parser.OFPPortMod(datapath=datapath, port_no=port_no, config=config, mask=0b11111111, hw_addr=datapath.ports[port_no].hw_addr)
+        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV |
+                  ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
+        msg = parser.OFPPortMod(
+            datapath=datapath,
+            port_no=port_no,
+            config=config,
+            mask=0b11111111,
+            hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
 
     def _block_datapath(self, datapath):
         if datapath.id not in self.to_block:
             return
         for port_no in self.to_block[datapath.id]:
-            self.logger.info(f'Blocking port {port_no} of datapath {datapath.id}')
+            self.logger.info(
+                f'Blocking port {port_no} of datapath {datapath.id}')
             self._block_port(datapath, port_no)
         self.to_block[datapath.id].clear()
 
@@ -179,7 +190,8 @@ class Switch(app_manager.RyuApp):
         dpid = format(datapath.id, "d").zfill(16)
         self.mac_to_port.setdefault(dpid, {})
 
-        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+        if not src.startswith("33:33:") and not dst.startswith("33:33:"):
+            self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -229,7 +241,8 @@ class Switch(app_manager.RyuApp):
                 self.drop_packets(datapath, priority, match)
             else:
                 if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                    self.add_flow(datapath, priority, match, actions, msg.buffer_id)
+                    self.add_flow(
+                        datapath, priority, match, actions, msg.buffer_id)
                     return
                 else:
                     self.add_flow(datapath, priority, match, actions)
@@ -238,8 +251,12 @@ class Switch(app_manager.RyuApp):
             data = msg.data
 
         if not drop:
-            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                      in_port=in_port, actions=actions, data=data)
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=msg.buffer_id,
+                in_port=in_port,
+                actions=actions,
+                data=data)
             datapath.send_msg(out)
 
     @staticmethod
@@ -265,8 +282,9 @@ class Switch(app_manager.RyuApp):
             self.logger.info(row_format.format(*row))
 
     def on_detect_congestion(self, datapath, port):
-        # TODO: Re-route
-        self.logger.info(f"Detect congestion: datapath = {datapath}, port = {port}")
+        # TODO: Drop or Re-route
+        self.logger.info(
+            f"Detect congestion: datapath = {datapath}, port = {port}")
 
     def monitor(self):
         while True:
@@ -291,6 +309,8 @@ class Switch(app_manager.RyuApp):
             for datapath, datapath_stats in self.flow_stats.items():
                 for stat in datapath_stats:
                     if len(stat.instructions[0].actions) == 0:
+                        continue
+                    if 'in_port' not in stat.match:
                         continue
                     rows.append([
                         datapath,
@@ -317,6 +337,7 @@ class Switch(app_manager.RyuApp):
         CONGESTION_THRESHOLD = 10 * 1024 * 1024
         for stat in ev.msg.body:
             key = (ev.msg.datapath.id, stat.port_no)
-            if key in self.prev_stats and stat.tx_bytes - self.prev_stats[key] > CONGESTION_THRESHOLD:
+            if key in self.prev_stats and stat.tx_bytes - \
+                    self.prev_stats[key] > CONGESTION_THRESHOLD:
                 self.on_detect_congestion(ev.msg.datapath, stat.port_no)
             self.prev_stats[key] = stat.tx_bytes
