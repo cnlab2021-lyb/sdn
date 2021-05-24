@@ -27,6 +27,31 @@ from ryu.lib.packet import ether_types
 from ryu.lib.packet import ipv4, ipv6
 from ryu.lib.packet import arp
 from ryu.lib import hub
+from ryu.topology.event import EventLinkAdd
+
+
+class UnionFind(object):
+    def __init__(self):
+        self.components = {}
+
+    def add_vertex(self, vertex):
+        if vertex not in self.components:
+            self.components[vertex] = vertex
+
+    def find_component(self, vertex):
+        if self.components[vertex] == vertex:
+            return vertex
+        result = self.find_component(self.components[vertex])
+        self.components[vertex] = result
+        return result
+
+    def merge(self, src, dst):
+        src = self.find_component(src)
+        dst = self.find_component(dst)
+        if src == dst:
+            return False
+        self.components[src] = dst
+        return True
 
 
 class Switch(app_manager.RyuApp):
@@ -39,6 +64,23 @@ class Switch(app_manager.RyuApp):
         self.monitor_thread = hub.spawn(self.monitor)
         self.flow_stats = collections.defaultdict(list)
         self.prev_stats = {}
+        self.union_find = UnionFind()
+        self.to_block = collections.defaultdict(set)
+        self.tree_link = collections.defaultdict(set)
+
+    @set_ev_cls(EventLinkAdd, MAIN_DISPATCHER)
+    def link_add_handler(self, ev):
+        link = ev.link
+        self.union_find.add_vertex(link.src.dpid)
+        self.union_find.add_vertex(link.dst.dpid)
+        if not self.union_find.merge(link.src.dpid, link.dst.dpid):
+            if link.src.port_no not in self.tree_link[link.src.dpid]:
+                self.to_block[link.src.dpid].add(link.src.port_no)
+            if link.dst.port_no not in self.tree_link[link.dst.dpid]:
+                self.to_block[link.dst.dpid].add(link.dst.port_no)
+        else:
+            self.tree_link[link.src.dpid].add(link.src.port_no)
+            self.tree_link[link.dst.dpid].add(link.dst.port_no)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -82,6 +124,21 @@ class Switch(app_manager.RyuApp):
         msg = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst)
         datapath.send_msg(msg)
 
+    def _block_port(self, datapath, port_no):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV | ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
+        msg = parser.OFPPortMod(datapath=datapath, port_no=port_no, config=config, mask=0b11111111, hw_addr=datapath.ports[port_no].hw_addr)
+        datapath.send_msg(msg)
+
+    def _block_datapath(self, datapath):
+        if datapath.id not in self.to_block:
+            return
+        for port_no in self.to_block[datapath.id]:
+            self.logger.info(f'Blocking port {port_no} of datapath {datapath.id}')
+            self._block_port(datapath, port_no)
+        self.to_block[datapath.id].clear()
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         # If you hit this you might want to increase
@@ -91,6 +148,8 @@ class Switch(app_manager.RyuApp):
                               ev.msg.msg_len, ev.msg.total_len)
         msg = ev.msg
         datapath = msg.datapath
+        self._block_datapath(datapath)
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
