@@ -215,6 +215,8 @@ class Switch(app_manager.RyuApp):
             }
             priority = 1
             for p in pkt:
+                if not isinstance(p, packet.packet_base.PacketBase):
+                    continue
                 if p.protocol_name == 'ipv4':
                     args['ip_proto'] = p.proto
                     args['ipv4_src'] = p.src
