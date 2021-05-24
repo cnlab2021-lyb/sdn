@@ -343,6 +343,20 @@ class Switch(app_manager.RyuApp):
                         del self.data_port_stats[dp][match]
             self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
+            columns = [
+                'datapath',
+                'port',
+                'tx-bytes',
+                'tx-pkts',
+                'rx-bytes',
+                'rx-pkts',
+                'dropped',
+                'error'
+            ]
+            rows = [columns]
+            for (datapath, port), data in self.prev_port_stats.items():
+                rows.append([datapath, port] + data)
+            self._print_table(rows)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
@@ -356,6 +370,12 @@ class Switch(app_manager.RyuApp):
         for stat in ev.msg.body:
             key = (ev.msg.datapath.id, stat.port_no)
             if key in self.prev_port_stats and stat.tx_bytes - \
-                    self.prev_port_stats[key] > CONGESTION_THRESHOLD:
+                    self.prev_port_stats[key][0] > CONGESTION_THRESHOLD:
                 self.on_detect_congestion(ev.msg.datapath, stat.port_no)
-            self.prev_port_stats[key] = stat.tx_bytes
+            self.prev_port_stats[key] = [
+                    stat.tx_bytes,
+                    stat.tx_packets,
+                    stat.rx_bytes,
+                    stat.rx_packets,
+                    stat.rx_dropped + stat.tx_dropped,
+                    stat.rx_errors + stat.tx_errors]
