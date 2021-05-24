@@ -63,7 +63,9 @@ class Switch(app_manager.RyuApp):
         self.datapaths = set()
         self.monitor_thread = hub.spawn(self.monitor)
         self.flow_stats = collections.defaultdict(list)
-        self.prev_stats = {}
+        self.datapath_port_stats = collections.defaultdict(dict)
+        self.prev_port_stats = {}
+        self.prev_flow_stats = {}
         self.union_find = UnionFind()
         self.to_block = collections.defaultdict(set)
         self.tree_link = collections.defaultdict(set)
@@ -285,6 +287,11 @@ class Switch(app_manager.RyuApp):
         # TODO: Drop or Re-route
         self.logger.info(
             f"Detect congestion: datapath = {datapath}, port = {port}")
+        if len(self.datapath_port_stats[datapath.id]) == 0:
+            return
+        print(self.datapath_port_stats[datapath.id])
+        flow = max([(k, v) for (k, v) in self.datapath_port_stats[datapath.id].items() if v[0]['in_port'] == port], key=lambda x: x[1][1])
+        self.drop_packets(datapath, 100, flow[1][0])
 
     def monitor(self):
         while True:
@@ -306,12 +313,16 @@ class Switch(app_manager.RyuApp):
                 'bytes'
             ]
             rows = [columns]
+            new_flow_stats = {}
             for datapath, datapath_stats in self.flow_stats.items():
                 for stat in datapath_stats:
-                    if len(stat.instructions[0].actions) == 0:
+                    if len(stat.instructions[0].actions) == 0 or 'in_port' not in stat.match:
                         continue
-                    if 'in_port' not in stat.match:
-                        continue
+                    flow_key = str(stat.match)
+                    if (datapath, flow_key) in self.prev_flow_stats:
+                        delta = stat.byte_count - self.prev_flow_stats[(datapath, flow_key)]
+                        self.datapath_port_stats[datapath][flow_key] = (stat.match, delta)
+                    new_flow_stats[(datapath, flow_key)] = stat.byte_count
                     rows.append([
                         datapath,
                         stat.match['in_port'],
@@ -324,6 +335,11 @@ class Switch(app_manager.RyuApp):
                         stat.packet_count,
                         stat.byte_count
                     ])
+            for (dp, match) in self.prev_flow_stats:
+                if (dp, match) not in new_flow_stats:
+                    if dp in self.datapath_port_stats and match in self.datapath_port_stats[dp]:
+                        del self.data_port_stats[dp][match]
+            self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
@@ -337,7 +353,7 @@ class Switch(app_manager.RyuApp):
         CONGESTION_THRESHOLD = 10 * 1024 * 1024
         for stat in ev.msg.body:
             key = (ev.msg.datapath.id, stat.port_no)
-            if key in self.prev_stats and stat.tx_bytes - \
-                    self.prev_stats[key] > CONGESTION_THRESHOLD:
+            if key in self.prev_port_stats and stat.tx_bytes - \
+                    self.prev_port_stats[key] > CONGESTION_THRESHOLD:
                 self.on_detect_congestion(ev.msg.datapath, stat.port_no)
-            self.prev_stats[key] = stat.tx_bytes
+            self.prev_port_stats[key] = stat.tx_bytes
