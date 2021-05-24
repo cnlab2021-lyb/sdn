@@ -318,8 +318,12 @@ class Switch(app_manager.RyuApp):
             new_flow_stats = {}
             for datapath, datapath_stats in self.flow_stats.items():
                 for stat in datapath_stats:
-                    if len(stat.instructions[0].actions) == 0 or 'in_port' not in stat.match:
+                    if 'in_port' not in stat.match:
                         continue
+                    if len(stat.instructions[0].actions) == 0:
+                        action = 'DROP'
+                    else:
+                        action = f'port {stat.instructions[0].actions[0].port}'
                     flow_key = str(stat.match)
                     if (datapath, flow_key) in self.prev_flow_stats:
                         delta = stat.byte_count - self.prev_flow_stats[(datapath, flow_key)]
@@ -333,7 +337,7 @@ class Switch(app_manager.RyuApp):
                         stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
                         stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
                         self._get_protocol(stat.match),
-                        stat.instructions[0].actions[0].port,
+                        action,
                         stat.packet_count,
                         stat.byte_count
                     ])
