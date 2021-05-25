@@ -407,9 +407,10 @@ class Switch(app_manager.RyuApp):
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
 
+        print(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        self.logger.info(f'Re-routing match = {match}')
         new_match = self._copy_match(match, in_port, parser)
 
         self._drop_packets(datapath=datapath, priority=50, match=new_match)
@@ -419,12 +420,42 @@ class Switch(app_manager.RyuApp):
         if (link.dst.dpid, link.dst.port_no) in self.is_blocked:
             self._unblock_port(self.datapaths[link.dst.dpid], link.dst.port_no)
 
-        print(f'Re-routing match = {new_match}')
+        self.logger.info(f'Re-routing match = {new_match}')
+        # print(f'Re-routing match = {new_match}')
         actions = [parser.OFPActionOutput(link.src.port_no)]
         self.add_flow(datapath=datapath,
                       priority=100,
                       match=new_match,
                       actions=actions)
+
+    def _reroute_end(self, dst_port, dpid, match, in_port):
+        datapath = self.datapaths[dpid]
+
+        # print(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
+
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        new_match = self._copy_match(match, in_port, parser)
+
+        self._drop_packets(datapath=datapath, priority=50, match=new_match)
+
+        if (dpid, dst_port) in self.is_blocked:
+            self._unblock_port(datapath, dst_port)
+
+        self.logger.info(f'Re-routing match = {new_match}')
+        # print(f'Re-routing match = {new_match}')
+        actions = [parser.OFPActionOutput(dst_port)]
+        self.add_flow(datapath=datapath,
+                      priority=100,
+                      match=new_match,
+                      actions=actions)
+
+    @staticmethod
+    def _print_path(name, path):
+        print(name + " path", end="")
+        for (link, is_backup) in path:
+            print(link, is_backup, end=" ")
+        print("")
 
     def on_detect_congestion(self, datapath, port, delta=None):
         # TODO: Re-route
@@ -448,16 +479,19 @@ class Switch(app_manager.RyuApp):
         dst, dst_port = self._trace(datapath.id, match['eth_dst'])
         primary_path = self.primary_spanning_tree.find_path(src, dst)
         assert primary_path is not None
+        self._print_path("primary", primary_path)
         self._add_backup_edges()
         secondary_path = self.secondary_spanning_tree.find_path(src, dst)
         assert secondary_path is not None
+        self._print_path("secondary", secondary_path)
         has_alternative = False
         in_port = src_port
         for link, is_backup in secondary_path:
             if not is_backup:
                 has_alternative = True
-                self._reroute(link, match, in_port)
+            self._reroute(link, match, in_port)
             in_port = link.dst.port_no
+        self._reroute_end(dst_port, dst, match, in_port)
         if not has_alternative:
             self.logger.info(f"Drop flow: {match}")
             print(f"Drop flow: {match}")
