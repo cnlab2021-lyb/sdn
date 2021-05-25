@@ -91,7 +91,7 @@ class SpanningTree(object):
         return path[::-1]
 
     def get_link(self, dp, port):
-        assert dp in self.tree_edges
+        # assert dp in self.tree_edges
         for (link, is_backup) in self.tree_edges[dp]:
             assert link.src.dpid == dp
             if link.src.port_no == port:
@@ -207,7 +207,6 @@ class Switch(app_manager.RyuApp):
                                 hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
         self.logger.info(f"Blocking port {port_no} of datapath {datapath.id}")
-        print(f"Blocking port {port_no} of datapath {datapath.id}")
         self.is_blocked.add((datapath.id, port_no))
 
     def _unblock_port(self, datapath, port_no):
@@ -222,7 +221,6 @@ class Switch(app_manager.RyuApp):
         datapath.send_msg(msg)
         self.logger.info(
             f"Unblocking port {port_no} of datapath {datapath.id}")
-        print(f"Unblocking port {port_no} of datapath {datapath.id}")
         self.is_blocked.remove((datapath.id, port_no))
         self.is_unblocked.add((datapath.id, port_no))
 
@@ -266,9 +264,6 @@ class Switch(app_manager.RyuApp):
             vlan_src = int(arp_pkt.src_ip.split('.')[3]) % 2
             vlan_dst = int(arp_pkt.dst_ip.split('.')[3]) % 2
             drop |= vlan_src != vlan_dst
-
-        # FIXME: Remove
-        drop = False
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
@@ -386,23 +381,25 @@ class Switch(app_manager.RyuApp):
             self.secondary_spanning_tree.merge(link, True)
 
     @staticmethod
-    def _copy_match(match, in_port, parser):
-        args = {
-            'in_port': in_port,
-            'eth_dst': match['eth_dst'],
-            'eth_src': match['eth_src'],
-            'eth_type': match['eth_type']
-        }
+    def _get_match_fields(match):
+        args = {}
+
         for key in [
-                'ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst',
+                'eth_src', 'eth_dst', 'eth_type', 'ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst',
                 'arp_spa', 'arp_tpa', 'tcp_src', 'tcp_dst', 'udp_src',
                 'udp_dst'
         ]:
             if key in match:
                 args[key] = match[key]
+        return args
+
+    @staticmethod
+    def _copy_match(match, in_port, parser):
+        args = Switch._get_match_fields(match)
+        args['in_port'] = in_port
         return parser.OFPMatch(**args)
 
-    def _reroute(self, link, match, in_port):
+    def _reroute(self, link, match, in_port, is_tree_edge):
         assert link.src.dpid in self.datapaths
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
@@ -427,6 +424,20 @@ class Switch(app_manager.RyuApp):
                       priority=100,
                       match=new_match,
                       actions=actions)
+        new_match = parser.OFPMatch()
+        actions = [
+            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                   ofproto.OFPCML_NO_BUFFER)
+        ]
+        self.datapaths[datapath.id] = datapath
+        self.add_flow(datapath, 0, new_match, actions)
+        if not is_tree_edge:
+            args = {
+                'eth_dst': 'ff:ff:ff:ff:ff:ff',
+                'in_port': in_port
+            }
+            new_match = parser.OFPMatch(**args)
+            self._drop_packets(datapath=datapath, priority=100, match=match)
 
     def _reroute_end(self, dst_port, dpid, match, in_port):
         datapath = self.datapaths[dpid]
@@ -449,6 +460,19 @@ class Switch(app_manager.RyuApp):
                       priority=100,
                       match=new_match,
                       actions=actions)
+        new_match = parser.OFPMatch()
+        actions = [
+            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                   ofproto.OFPCML_NO_BUFFER)
+        ]
+        self.datapaths[datapath.id] = datapath
+        self.add_flow(datapath, 0, new_match, actions)
+        args = {
+            'eth_dst': 'ff:ff:ff:ff:ff:ff',
+            'in_port': in_port
+        }
+        new_match = parser.OFPMatch(**args)
+        self._drop_packets(datapath=datapath, priority=100, match=match)
 
     @staticmethod
     def _print_path(name, path):
@@ -470,7 +494,8 @@ class Switch(app_manager.RyuApp):
              if v[0]['in_port'] == port],
             key=lambda x: x[1][1])
         # Do nothing if the flow has already be re-routed.
-        if str(match) in self.rerouted_flow:
+        key = frozenset(sorted(Switch._get_match_fields(match)))
+        if key in self.rerouted_flow:
             self.logger.info(f"flow {match} has already been re-routed")
             print(f"flow {match} has already been re-routed")
             return
@@ -484,22 +509,24 @@ class Switch(app_manager.RyuApp):
         secondary_path = self.secondary_spanning_tree.find_path(src, dst)
         assert secondary_path is not None
         self._print_path("secondary", secondary_path)
+        drop = True
         has_alternative = False
-        in_port = src_port
-        for link, is_backup in secondary_path:
-            if not is_backup:
-                has_alternative = True
-            self._reroute(link, match, in_port)
-            in_port = link.dst.port_no
-        self._reroute_end(dst_port, dst, match, in_port)
-        if not has_alternative:
+        if not drop:
+            in_port = src_port
+            for link, is_backup in secondary_path:
+                if not is_backup:
+                    has_alternative = True
+                self._reroute(link, match, in_port, is_backup)
+                in_port = link.dst.port_no
+            self._reroute_end(dst_port, dst, match, in_port)
+        if not has_alternative or drop:
             self.logger.info(f"Drop flow: {match}")
             print(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath, priority=100, match=match)
         else:
             self.logger.info(f"Reroute flow: {match}")
             print(f"Reroute flow: {match}")
-            self.rerouted_flow.add(str(match))
+            self.rerouted_flow.add(key)
 
     def monitor(self):
         SLEEP_SECS = 2
