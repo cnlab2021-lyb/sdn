@@ -294,7 +294,8 @@ class Switch(app_manager.RyuApp):
     def on_detect_congestion(self, datapath, port, delta=None):
         # TODO: Drop or Re-route
         self.logger.info(
-            f"Detect congestion: datapath = {datapath.id}, port = {port}, delta = {delta}")
+            f"Detect congestion: datapath = {datapath.id}, port = {port}, delta = {delta}"
+        )
         if len(self.datapath_port_stats[datapath.id]) == 0:
             return
         flow = max(
@@ -363,7 +364,8 @@ class Switch(app_manager.RyuApp):
                     if delta_sum > CONGESTION_THRESHOLD:
                         datapath_obj = next(x for x in self.datapaths
                                             if x.id == datapath)
-                        self.on_detect_congestion(datapath_obj, port, delta_sum)
+                        self.on_detect_congestion(datapath_obj, port,
+                                                  delta_sum)
             self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
             columns = [
