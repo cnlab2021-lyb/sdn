@@ -304,13 +304,14 @@ class Switch(app_manager.RyuApp):
         self.drop_packets(datapath, 100, flow[1][0])
 
     def monitor(self):
-        CONGESTION_THRESHOLD = 10 * 1024 * 1024
+        SLEEP_SECS = 2
+        CONGESTION_THRESHOLD = SLEEP_SECS * 1024 * 1024
         while True:
             for datapath in self.datapaths:
                 parser = datapath.ofproto_parser
                 datapath.send_msg(parser.OFPFlowStatsRequest(datapath))
                 datapath.send_msg(parser.OFPPortStatsRequest(datapath))
-            hub.sleep(10)
+            hub.sleep(SLEEP_SECS)
             columns = [
                 'datapath', 'in-port', 'src-ip', 'src-port', 'dst-ip',
                 'dst-port', 'protocol', 'action', 'packets', 'bytes'
