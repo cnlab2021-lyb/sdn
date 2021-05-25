@@ -192,7 +192,9 @@ class Switch(app_manager.RyuApp):
 
     # Block the `port_no`-th port of `datapath`.
     def _block_port(self, datapath, port_no):
-        if (datapath.id, port_no) in self.is_blocked or (datapath.id, port_no) in self.is_unblocked:
+        if (datapath.id,
+                port_no) in self.is_blocked or (datapath.id,
+                                                port_no) in self.is_unblocked:
             return
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -220,8 +222,7 @@ class Switch(app_manager.RyuApp):
         datapath.send_msg(msg)
         self.logger.info(
             f"Unblocking port {port_no} of datapath {datapath.id}")
-        print(
-            f"Unblocking port {port_no} of datapath {datapath.id}")
+        print(f"Unblocking port {port_no} of datapath {datapath.id}")
         self.is_blocked.remove((datapath.id, port_no))
         self.is_unblocked.add((datapath.id, port_no))
 
@@ -311,8 +312,8 @@ class Switch(app_manager.RyuApp):
         match = parser.OFPMatch(**args)
 
         if not src.startswith("33:33:") and not dst.startswith("33:33:"):
-            self.logger.info("packet in %s %s %s %s, matching %s",
-                dpid, src, dst, in_port, str(match))
+            self.logger.info("packet in %s %s %s %s, matching %s", dpid, src,
+                             dst, in_port, str(match))
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -392,7 +393,11 @@ class Switch(app_manager.RyuApp):
             'eth_src': match['eth_src'],
             'eth_type': match['eth_type']
         }
-        for key in ['ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst', 'arp_spa', 'arp_tpa', 'tcp_src', 'tcp_dst', 'udp_src', 'udp_dst']:
+        for key in [
+                'ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst',
+                'arp_spa', 'arp_tpa', 'tcp_src', 'tcp_dst', 'udp_src',
+                'udp_dst'
+        ]:
             if key in match:
                 args[key] = match[key]
         return parser.OFPMatch(**args)
@@ -407,9 +412,7 @@ class Switch(app_manager.RyuApp):
         self.logger.info(f'Re-routing match = {match}')
         new_match = self._copy_match(match, in_port, parser)
 
-        self._drop_packets(datapath=datapath,
-                      priority=50,
-                      match=new_match)
+        self._drop_packets(datapath=datapath, priority=50, match=new_match)
 
         if (link.src.dpid, link.src.port_no) in self.is_blocked:
             self._unblock_port(datapath, link.src.port_no)
