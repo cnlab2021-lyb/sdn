@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import collections
+import itertools
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -296,6 +297,7 @@ class Switch(app_manager.RyuApp):
         self.drop_packets(datapath, 100, flow[1][0])
 
     def monitor(self):
+        CONGESTION_THRESHOLD = 10 * 1024 * 1024
         while True:
             for datapath in self.datapaths:
                 parser = datapath.ofproto_parser
@@ -345,6 +347,13 @@ class Switch(app_manager.RyuApp):
                 if (dp, match) not in new_flow_stats:
                     if dp in self.datapath_port_stats and match in self.datapath_port_stats[dp]:
                         del self.data_port_stats[dp][match]
+            for datapath, stats in self.datapath_port_stats.items():
+                for port, g in itertools.groupby(
+                        stats.items(), lambda x: x[1][0]['in_port']):
+                    delta_sum = sum(x[1][1] for x in g)
+                    if delta_sum > CONGESTION_THRESHOLD:
+                        datapath_obj = next(x for x in self.datapaths if x.id == datapath)
+                        self.on_detect_congestion(datapath_obj, port)
             self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
             columns = [
@@ -370,12 +379,8 @@ class Switch(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
-        CONGESTION_THRESHOLD = 10 * 1024 * 1024
         for stat in ev.msg.body:
             key = (ev.msg.datapath.id, stat.port_no)
-            if key in self.prev_port_stats and stat.tx_bytes - \
-                    self.prev_port_stats[key][0] > CONGESTION_THRESHOLD:
-                self.on_detect_congestion(ev.msg.datapath, stat.port_no)
             self.prev_port_stats[key] = [
                     stat.tx_bytes,
                     stat.tx_packets,
