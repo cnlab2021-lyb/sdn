@@ -15,4 +15,4 @@ class TreeTopo(Topo):
             self.addLink(root, switch)
 
 
-topos = {'tree-topo': (lambda: TreeTopo())}
+topos = {'tree-topo': (lambda n_hosts: TreeTopo(n_hosts))}

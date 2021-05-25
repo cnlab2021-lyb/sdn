@@ -2,23 +2,23 @@ from mininet.topo import Topo
 
 
 class DataCenterTopo(Topo):
-    def __init__(self, hosts=16):
-        assert hosts % 4 == 0
+    def __init__(self, n_cores, n_aggregations):
         Topo.__init__(self)
-        clusters = hosts // 4
-        cores = [self.addSwitch('s%d' % i) for i in range(clusters)]
+        n_hosts = n_aggregations * 4
+        cores = [self.addSwitch('s%d' % i) for i in range(n_cores)]
         aggregations = [
-            self.addSwitch('s%d' % (i + clusters)) for i in range(clusters * 2)
+            self.addSwitch('s%d' % (i + n_cores))
+            for i in range(n_aggregations * 2)
         ]
         edges = [
-            self.addSwitch('s%d' % (i + clusters * 3))
-            for i in range(clusters * 2)
+            self.addSwitch('s%d' % (i + n_cores + n_aggregations * 2))
+            for i in range(n_aggregations * 2)
         ]
-        hosts = [self.addHost('h%d' % i) for i in range(hosts)]
+        hosts = [self.addHost('h%d' % i) for i in range(n_hosts)]
 
-        for i in range(clusters):
-            for j in range(clusters):
-                self.addLink(cores[i], aggregations[2 * j + (i % 2)])
+        for i in range(n_aggregations):
+            for j in range(n_cores):
+                self.addLink(cores[j], aggregations[2 * i + j % 2])
 
             self.addLink(aggregations[2 * i], edges[2 * i])
             self.addLink(aggregations[2 * i + 1], edges[2 * i])
@@ -30,4 +30,7 @@ class DataCenterTopo(Topo):
             self.addLink(edges[2 * i + 1], hosts[4 * i + 3])
 
 
-topos = {'data-center-topo': (lambda: DataCenterTopo())}
+topos = {
+    'data-center-topo':
+    (lambda n_cores, n_aggregations: DataCenterTopo(n_cores, n_aggregations))
+}
