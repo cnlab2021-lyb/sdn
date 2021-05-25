@@ -99,8 +99,10 @@ class Switch(app_manager.RyuApp):
         # truncated packet data. In that case, we cannot output packets
         # correctly.  The bug has been fixed in OVS v2.1.0.
         match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
+        actions = [
+            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                   ofproto.OFPCML_NO_BUFFER)
+        ]
         self.datapaths.add(datapath)
         self.add_flow(datapath, 0, match, actions)
 
@@ -108,15 +110,20 @@ class Switch(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                             actions)]
+        inst = [
+            parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)
+        ]
         if buffer_id:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                    priority=priority, match=match,
+            mod = parser.OFPFlowMod(datapath=datapath,
+                                    buffer_id=buffer_id,
+                                    priority=priority,
+                                    match=match,
                                     instructions=inst)
         else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst)
+            mod = parser.OFPFlowMod(datapath=datapath,
+                                    priority=priority,
+                                    match=match,
+                                    instructions=inst)
         datapath.send_msg(mod)
 
     def drop_packets(self, datapath, priority, match):
@@ -124,24 +131,22 @@ class Switch(app_manager.RyuApp):
         parser = datapath.ofproto_parser
 
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_CLEAR_ACTIONS, [])]
-        msg = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=priority,
-            match=match,
-            instructions=inst)
+        msg = parser.OFPFlowMod(datapath=datapath,
+                                priority=priority,
+                                match=match,
+                                instructions=inst)
         datapath.send_msg(msg)
 
     def _block_port(self, datapath, port_no):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV |
-                  ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
-        msg = parser.OFPPortMod(
-            datapath=datapath,
-            port_no=port_no,
-            config=config,
-            mask=0b11111111,
-            hw_addr=datapath.ports[port_no].hw_addr)
+        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV
+                  | ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
+        msg = parser.OFPPortMod(datapath=datapath,
+                                port_no=port_no,
+                                config=config,
+                                mask=0b11111111,
+                                hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
 
     def _block_datapath(self, datapath):
@@ -246,8 +251,8 @@ class Switch(app_manager.RyuApp):
                 self.drop_packets(datapath, priority, match)
             else:
                 if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                    self.add_flow(
-                        datapath, priority, match, actions, msg.buffer_id)
+                    self.add_flow(datapath, priority, match, actions,
+                                  msg.buffer_id)
                     return
                 else:
                     self.add_flow(datapath, priority, match, actions)
@@ -256,12 +261,11 @@ class Switch(app_manager.RyuApp):
             data = msg.data
 
         if not drop:
-            out = parser.OFPPacketOut(
-                datapath=datapath,
-                buffer_id=msg.buffer_id,
-                in_port=in_port,
-                actions=actions,
-                data=data)
+            out = parser.OFPPacketOut(datapath=datapath,
+                                      buffer_id=msg.buffer_id,
+                                      in_port=in_port,
+                                      actions=actions,
+                                      data=data)
             datapath.send_msg(out)
 
     @staticmethod
@@ -293,7 +297,11 @@ class Switch(app_manager.RyuApp):
         if len(self.datapath_port_stats[datapath.id]) == 0:
             return
         print(self.datapath_port_stats[datapath.id])
-        flow = max([(k, v) for (k, v) in self.datapath_port_stats[datapath.id].items() if v[0]['in_port'] == port], key=lambda x: x[1][1])
+        flow = max(
+            [(k, v)
+             for (k, v) in self.datapath_port_stats[datapath.id].items()
+             if v[0]['in_port'] == port],
+            key=lambda x: x[1][1])
         self.drop_packets(datapath, 100, flow[1][0])
 
     def monitor(self):
@@ -305,16 +313,8 @@ class Switch(app_manager.RyuApp):
                 datapath.send_msg(parser.OFPPortStatsRequest(datapath))
             hub.sleep(10)
             columns = [
-                'datapath',
-                'in-port',
-                'src-ip',
-                'src-port',
-                'dst-ip',
-                'dst-port',
-                'protocol',
-                'action',
-                'packets',
-                'bytes'
+                'datapath', 'in-port', 'src-ip', 'src-port', 'dst-ip',
+                'dst-port', 'protocol', 'action', 'packets', 'bytes'
             ]
             rows = [columns]
             new_flow_stats = {}
@@ -328,43 +328,46 @@ class Switch(app_manager.RyuApp):
                         action = f'port {stat.instructions[0].actions[0].port}'
                     flow_key = str(stat.match)
                     if (datapath, flow_key) in self.prev_flow_stats:
-                        delta = stat.byte_count - self.prev_flow_stats[(datapath, flow_key)]
-                        self.datapath_port_stats[datapath][flow_key] = (stat.match, delta)
+                        delta = stat.byte_count - self.prev_flow_stats[
+                            (datapath, flow_key)]
+                        self.datapath_port_stats[datapath][flow_key] = (
+                            stat.match, delta)
                     new_flow_stats[(datapath, flow_key)] = stat.byte_count
                     rows.append([
-                        datapath,
-                        stat.match['in_port'],
-                        stat.match.get('ipv4_src', stat.match.get('ipv6_src', stat.match.get('arp_spa', ''))),
-                        stat.match.get('tcp_src', stat.match.get('udp_src', '')),
-                        stat.match.get('ipv4_dst', stat.match.get('ipv6_dst', stat.match.get('arp_tpa', ''))),
-                        stat.match.get('tcp_dst', stat.match.get('udp_dst', '')),
-                        self._get_protocol(stat.match),
-                        action,
-                        stat.packet_count,
-                        stat.byte_count
+                        datapath, stat.match['in_port'],
+                        stat.match.get(
+                            'ipv4_src',
+                            stat.match.get('ipv6_src',
+                                           stat.match.get('arp_spa', ''))),
+                        stat.match.get('tcp_src',
+                                       stat.match.get('udp_src', '')),
+                        stat.match.get(
+                            'ipv4_dst',
+                            stat.match.get('ipv6_dst',
+                                           stat.match.get('arp_tpa', ''))),
+                        stat.match.get('tcp_dst',
+                                       stat.match.get('udp_dst', '')),
+                        self._get_protocol(stat.match), action,
+                        stat.packet_count, stat.byte_count
                     ])
             for (dp, match) in self.prev_flow_stats:
                 if (dp, match) not in new_flow_stats:
-                    if dp in self.datapath_port_stats and match in self.datapath_port_stats[dp]:
+                    if dp in self.datapath_port_stats and match in self.datapath_port_stats[
+                            dp]:
                         del self.data_port_stats[dp][match]
             for datapath, stats in self.datapath_port_stats.items():
-                for port, g in itertools.groupby(
-                        stats.items(), lambda x: x[1][0]['in_port']):
+                for port, g in itertools.groupby(stats.items(),
+                                                 lambda x: x[1][0]['in_port']):
                     delta_sum = sum(x[1][1] for x in g)
                     if delta_sum > CONGESTION_THRESHOLD:
-                        datapath_obj = next(x for x in self.datapaths if x.id == datapath)
+                        datapath_obj = next(x for x in self.datapaths
+                                            if x.id == datapath)
                         self.on_detect_congestion(datapath_obj, port)
             self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
             columns = [
-                'datapath',
-                'port',
-                'tx-bytes',
-                'tx-pkts',
-                'rx-bytes',
-                'rx-pkts',
-                'dropped',
-                'error'
+                'datapath', 'port', 'tx-bytes', 'tx-pkts', 'rx-bytes',
+                'rx-pkts', 'dropped', 'error'
             ]
             rows = [columns]
             for (datapath, port), data in self.prev_port_stats.items():
@@ -382,9 +385,7 @@ class Switch(app_manager.RyuApp):
         for stat in ev.msg.body:
             key = (ev.msg.datapath.id, stat.port_no)
             self.prev_port_stats[key] = [
-                    stat.tx_bytes,
-                    stat.tx_packets,
-                    stat.rx_bytes,
-                    stat.rx_packets,
-                    stat.rx_dropped + stat.tx_dropped,
-                    stat.rx_errors + stat.tx_errors]
+                stat.tx_bytes, stat.tx_packets, stat.rx_bytes, stat.rx_packets,
+                stat.rx_dropped + stat.tx_dropped,
+                stat.rx_errors + stat.tx_errors
+            ]
