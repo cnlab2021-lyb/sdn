@@ -117,6 +117,7 @@ class Switch(app_manager.RyuApp):
         self.tree_link = collections.defaultdict(set)
         self.tree_edges = set()
         self.is_blocked = set()
+        self.is_unblocked = set()
         self.rerouted_flow = set()
 
     @set_ev_cls(EventLinkAdd, MAIN_DISPATCHER)
@@ -191,7 +192,7 @@ class Switch(app_manager.RyuApp):
 
     # Block the `port_no`-th port of `datapath`.
     def _block_port(self, datapath, port_no):
-        if (datapath.id, port_no) in self.is_blocked:
+        if (datapath.id, port_no) in self.is_blocked or (datapath.id, port_no) in self.is_unblocked:
             return
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -204,22 +205,25 @@ class Switch(app_manager.RyuApp):
                                 hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
         self.logger.info(f"Blocking port {port_no} of datapath {datapath.id}")
+        print(f"Blocking port {port_no} of datapath {datapath.id}")
         self.is_blocked.add((datapath.id, port_no))
 
     def _unblock_port(self, datapath, port_no):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV
-                  | ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
+        config = ofproto.OFPPC_NO_PACKET_IN
         msg = parser.OFPPortMod(datapath=datapath,
                                 port_no=port_no,
                                 config=config,
-                                mask=0b00000000,
+                                mask=0b1100101,
                                 hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
         self.logger.info(
             f"Unblocking port {port_no} of datapath {datapath.id}")
+        print(
+            f"Unblocking port {port_no} of datapath {datapath.id}")
         self.is_blocked.remove((datapath.id, port_no))
+        self.is_unblocked.add((datapath.id, port_no))
 
     # Block non-tree edges incident to `datapath`.
     def _block_datapath(self, datapath):
@@ -319,6 +323,8 @@ class Switch(app_manager.RyuApp):
                     args['udp_dst'] = p.dst_port
                     priority += 1
             match = parser.OFPMatch(**args)
+            if not src.startswith("33:33:") and not dst.startswith("33:33:"):
+                self.logger.info(f"packet in match = {match}")
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
             if drop:
@@ -370,29 +376,50 @@ class Switch(app_manager.RyuApp):
         port = self.mac_to_port[dpid][eth]
         dst = self.primary_spanning_tree.get_link(dp, port)
         if dst is None:
-            return dp
+            return dp, port
         return self._trace(dst, eth)
 
     def _add_backup_edges(self):
         for link in self.tree_edges:
             self.secondary_spanning_tree.merge(link, True)
 
-    def _reroute(self, link, match):
+    @staticmethod
+    def _copy_match(match, in_port, parser):
+        args = {
+            'in_port': in_port,
+            'eth_dst': match['eth_dst'],
+            'eth_src': match['eth_src'],
+            'eth_type': match['eth_type']
+        }
+        for key in ['ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst', 'arp_spa', 'arp_tpa', 'tcp_src', 'tcp_dst', 'udp_src', 'udp_dst']:
+            if key in match:
+                args[key] = match[key]
+        return parser.OFPMatch(**args)
+
+    def _reroute(self, link, match, in_port):
         assert link.src.dpid in self.datapaths
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
+
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        self.logger.info(f'Re-routing match = {match}')
+        new_match = self._copy_match(match, in_port, parser)
+
+        self._drop_packets(datapath=datapath,
+                      priority=50,
+                      match=new_match)
 
         if (link.src.dpid, link.src.port_no) in self.is_blocked:
             self._unblock_port(datapath, link.src.port_no)
         if (link.dst.dpid, link.dst.port_no) in self.is_blocked:
             self._unblock_port(self.datapaths[link.dst.dpid], link.dst.port_no)
 
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        print(f'Re-routing match = {new_match}')
         actions = [parser.OFPActionOutput(link.src.port_no)]
         self.add_flow(datapath=datapath,
                       priority=100,
-                      match=match,
+                      match=new_match,
                       actions=actions)
 
     def on_detect_congestion(self, datapath, port, delta=None):
@@ -409,25 +436,31 @@ class Switch(app_manager.RyuApp):
             key=lambda x: x[1][1])
         # Do nothing if the flow has already be re-routed.
         if str(match) in self.rerouted_flow:
+            self.logger.info(f"flow {match} has already been re-routed")
+            print(f"flow {match} has already been re-routed")
             return
 
-        src = self._trace(datapath.id, match['eth_src'])
-        dst = self._trace(datapath.id, match['eth_dst'])
+        src, src_port = self._trace(datapath.id, match['eth_src'])
+        dst, dst_port = self._trace(datapath.id, match['eth_dst'])
         primary_path = self.primary_spanning_tree.find_path(src, dst)
         assert primary_path is not None
         self._add_backup_edges()
         secondary_path = self.secondary_spanning_tree.find_path(src, dst)
         assert secondary_path is not None
         has_alternative = False
+        in_port = src_port
         for link, is_backup in secondary_path:
             if not is_backup:
                 has_alternative = True
-                self._reroute(link, match)
+                self._reroute(link, match, in_port)
+            in_port = link.dst.port_no
         if not has_alternative:
             self.logger.info(f"Drop flow: {match}")
+            print(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath, priority=100, match=match)
         else:
             self.logger.info(f"Reroute flow: {match}")
+            print(f"Reroute flow: {match}")
             self.rerouted_flow.add(str(match))
 
     def monitor(self):
