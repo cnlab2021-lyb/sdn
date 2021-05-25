@@ -134,7 +134,8 @@ class Switch(app_manager.RyuApp):
         msg = parser.OFPFlowMod(datapath=datapath,
                                 priority=priority,
                                 match=match,
-                                instructions=inst)
+                                instructions=inst,
+                                command=ofproto.OFPFC_MODIFY)
         datapath.send_msg(msg)
 
     def _block_port(self, datapath, port_no):
