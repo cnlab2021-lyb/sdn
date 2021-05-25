@@ -276,8 +276,43 @@ class Switch(app_manager.RyuApp):
         dpid = format(datapath.id, "d").zfill(16)
         self.mac_to_port.setdefault(dpid, {})
 
+        args = {
+            'in_port': in_port,
+            'eth_dst': dst,
+            'eth_src': src,
+            'eth_type': eth.ethertype
+        }
+        priority = 1
+        for p in pkt:
+            if not isinstance(p, packet.packet_base.PacketBase):
+                continue
+            if p.protocol_name == 'ipv4':
+                args['ip_proto'] = p.proto
+                args['ipv4_src'] = p.src
+                args['ipv4_dst'] = p.dst
+                priority += 1
+            elif p.protocol_name == 'ipv6':
+                # FIXME: This is probably not correct if there are other headers
+                args['ip_proto'] = p.nxt
+                args['ipv6_src'] = p.src
+                args['ipv6_dst'] = p.dst
+                priority += 1
+            elif p.protocol_name == 'arp':
+                args['arp_spa'] = p.src_ip
+                args['arp_tpa'] = p.dst_ip
+            elif p.protocol_name == 'tcp':
+                args['tcp_src'] = p.src_port
+                args['tcp_dst'] = p.dst_port
+                priority += 1
+            elif p.protocol_name == 'udp':
+                args['udp_src'] = p.src_port
+                args['udp_dst'] = p.dst_port
+                priority += 1
+        match = parser.OFPMatch(**args)
+
         if not src.startswith("33:33:") and not dst.startswith("33:33:"):
-            self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+            self.logger.info("packet in %s %s %s %s, matching %s",
+                dpid, src, dst, in_port, str(match))
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -291,40 +326,6 @@ class Switch(app_manager.RyuApp):
 
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
-            args = {
-                'in_port': in_port,
-                'eth_dst': dst,
-                'eth_src': src,
-                'eth_type': eth.ethertype
-            }
-            priority = 1
-            for p in pkt:
-                if not isinstance(p, packet.packet_base.PacketBase):
-                    continue
-                if p.protocol_name == 'ipv4':
-                    args['ip_proto'] = p.proto
-                    args['ipv4_src'] = p.src
-                    args['ipv4_dst'] = p.dst
-                    priority += 1
-                elif p.protocol_name == 'ipv6':
-                    args['ip_proto'] = p.proto
-                    args['ipv6_src'] = p.src
-                    args['ipv6_dst'] = p.dst
-                    priority += 1
-                elif p.protocol_name == 'arp':
-                    args['arp_spa'] = p.src_ip
-                    args['arp_tpa'] = p.dst_ip
-                elif p.protocol_name == 'tcp':
-                    args['tcp_src'] = p.src_port
-                    args['tcp_dst'] = p.dst_port
-                    priority += 1
-                elif p.protocol_name == 'udp':
-                    args['udp_src'] = p.src_port
-                    args['udp_dst'] = p.dst_port
-                    priority += 1
-            match = parser.OFPMatch(**args)
-            if not src.startswith("33:33:") and not dst.startswith("33:33:"):
-                self.logger.info(f"packet in match = {match}")
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
             if drop:
