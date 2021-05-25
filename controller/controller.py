@@ -29,11 +29,18 @@ from ryu.lib.packet import ipv4, ipv6
 from ryu.lib.packet import arp
 from ryu.lib import hub
 from ryu.topology.event import EventLinkAdd
+from ryu.topology.switches import Link
 
 
-class UnionFind(object):
+def reverse_link(link: Link) -> Link:
+    rev = Link(link.dst, link.src)
+    return rev
+
+
+class SpanningTree(object):
     def __init__(self):
         self.components = {}
+        self.tree_edges = collections.defaultdict(list)
 
     def add_vertex(self, vertex):
         if vertex not in self.components:
@@ -46,13 +53,50 @@ class UnionFind(object):
         self.components[vertex] = result
         return result
 
-    def merge(self, src, dst):
-        src = self.find_component(src)
-        dst = self.find_component(dst)
-        if src == dst:
+    def merge(self, link, is_backup=False):
+        self.add_vertex(link.src.dpid)
+        self.add_vertex(link.dst.dpid)
+        src_comp = self.find_component(link.src.dpid)
+        dst_comp = self.find_component(link.dst.dpid)
+        if src_comp == dst_comp:
             return False
-        self.components[src] = dst
+        self.components[src_comp] = dst_comp
+        self.tree_edges[link.src.dpid].append((link, is_backup))
+        self.tree_edges[link.dst.dpid].append((reverse_link(link), is_backup))
         return True
+
+    def find_path(self, src, dst):
+        visited = set()
+        parent_link = dict()
+        parent = dict()
+
+        def dfs(v):
+            visited.add(v)
+            for (link, is_backup) in self.tree_edges[v]:
+                assert link.src.dpid == v
+                u = link.dst.dpid
+                if u in visited:
+                    continue
+                parent[u] = v
+                parent_link[u] = (link, is_backup)
+                dfs(u)
+
+        dfs(src)
+        if dst not in visited:
+            return None
+        path = []
+        while dst != src:
+            path.append(parent_link[dst])
+            dst = parent[dst]
+        return path[::-1]
+
+    def get_link(self, dp, port):
+        assert dp in self.tree_edges
+        for (link, is_backup) in self.tree_edges[dp]:
+            assert link.src.dpid == dp
+            if link.src.port_no == port:
+                return link.dst.dpid
+        return None
 
 
 class Switch(app_manager.RyuApp):
@@ -61,27 +105,32 @@ class Switch(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(Switch, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.datapaths = set()
+        self.datapaths = dict()
         self.monitor_thread = hub.spawn(self.monitor)
         self.flow_stats = collections.defaultdict(list)
         self.datapath_port_stats = collections.defaultdict(dict)
         self.prev_port_stats = {}
         self.prev_flow_stats = {}
-        self.union_find = UnionFind()
+        self.primary_spanning_tree = SpanningTree()
+        self.secondary_spanning_tree = SpanningTree()
         self.to_block = collections.defaultdict(set)
         self.tree_link = collections.defaultdict(set)
+        self.tree_edges = set()
+        self.is_blocked = set()
+        self.rerouted_flow = set()
 
     @set_ev_cls(EventLinkAdd, MAIN_DISPATCHER)
     def link_add_handler(self, ev):
         link = ev.link
-        self.union_find.add_vertex(link.src.dpid)
-        self.union_find.add_vertex(link.dst.dpid)
-        if not self.union_find.merge(link.src.dpid, link.dst.dpid):
+        if not self.primary_spanning_tree.merge(link):
+            # Non-tree edge to be blocked later.
             if link.src.port_no not in self.tree_link[link.src.dpid]:
+                assert link.dst.port_no not in self.tree_link[link.dst.dpid]
                 self.to_block[link.src.dpid].add(link.src.port_no)
-            if link.dst.port_no not in self.tree_link[link.dst.dpid]:
                 self.to_block[link.dst.dpid].add(link.dst.port_no)
+                self.secondary_spanning_tree.merge(link)
         else:
+            self.tree_edges.add(link)
             self.tree_link[link.src.dpid].add(link.src.port_no)
             self.tree_link[link.dst.dpid].add(link.dst.port_no)
 
@@ -103,7 +152,7 @@ class Switch(app_manager.RyuApp):
             parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                    ofproto.OFPCML_NO_BUFFER)
         ]
-        self.datapaths.add(datapath)
+        self.datapaths[datapath.id] = datapath
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
@@ -126,10 +175,12 @@ class Switch(app_manager.RyuApp):
                                     instructions=inst)
         datapath.send_msg(mod)
 
-    def drop_packets(self, datapath, priority, match):
+    # Insert rule to `datapath` that drops flows matching `match`.
+    def _drop_packets(self, datapath, priority, match):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+        # Remove the default rule of "notifying the controller" inserted in `switch_feature_handler`.
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_CLEAR_ACTIONS, [])]
         msg = parser.OFPFlowMod(datapath=datapath,
                                 priority=priority,
@@ -138,7 +189,10 @@ class Switch(app_manager.RyuApp):
                                 command=ofproto.OFPFC_MODIFY)
         datapath.send_msg(msg)
 
+    # Block the `port_no`-th port of `datapath`.
     def _block_port(self, datapath, port_no):
+        if (datapath.id, port_no) in self.is_blocked:
+            return
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV
@@ -149,13 +203,29 @@ class Switch(app_manager.RyuApp):
                                 mask=0b11111111,
                                 hw_addr=datapath.ports[port_no].hw_addr)
         datapath.send_msg(msg)
+        self.logger.info(f"Blocking port {port_no} of datapath {datapath.id}")
+        self.is_blocked.add((datapath.id, port_no))
 
+    def _unblock_port(self, datapath, port_no):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        config = (ofproto.OFPPC_PORT_DOWN | ofproto.OFPPC_NO_RECV
+                  | ofproto.OFPPC_NO_FWD | ofproto.OFPPC_NO_PACKET_IN)
+        msg = parser.OFPPortMod(datapath=datapath,
+                                port_no=port_no,
+                                config=config,
+                                mask=0b00000000,
+                                hw_addr=datapath.ports[port_no].hw_addr)
+        datapath.send_msg(msg)
+        self.logger.info(
+            f"Unblocking port {port_no} of datapath {datapath.id}")
+        self.is_blocked.remove((datapath.id, port_no))
+
+    # Block non-tree edges incident to `datapath`.
     def _block_datapath(self, datapath):
         if datapath.id not in self.to_block:
             return
         for port_no in self.to_block[datapath.id]:
-            self.logger.info(
-                f'Blocking port {port_no} of datapath {datapath.id}')
             self._block_port(datapath, port_no)
         self.to_block[datapath.id].clear()
 
@@ -191,6 +261,9 @@ class Switch(app_manager.RyuApp):
             vlan_src = int(arp_pkt.src_ip.split('.')[3]) % 2
             vlan_dst = int(arp_pkt.dst_ip.split('.')[3]) % 2
             drop |= vlan_src != vlan_dst
+
+        # FIXME: Remove
+        drop = False
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
@@ -249,7 +322,7 @@ class Switch(app_manager.RyuApp):
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
             if drop:
-                self.drop_packets(datapath, priority, match)
+                self._drop_packets(datapath, priority, match)
             else:
                 if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                     self.add_flow(datapath, priority, match, actions,
@@ -291,24 +364,77 @@ class Switch(app_manager.RyuApp):
         for row in rows:
             self.logger.info(row_format.format(*row))
 
+    def _trace(self, dp, eth):
+        dpid = format(dp, "d").zfill(16)
+        assert eth in self.mac_to_port[dpid]
+        port = self.mac_to_port[dpid][eth]
+        dst = self.primary_spanning_tree.get_link(dp, port)
+        if dst is None:
+            return dp
+        return self._trace(dst, eth)
+
+    def _add_backup_edges(self):
+        for link in self.tree_edges:
+            self.secondary_spanning_tree.merge(link, True)
+
+    def _reroute(self, link, match):
+        assert link.src.dpid in self.datapaths
+        assert link.dst.dpid in self.datapaths
+        datapath = self.datapaths[link.src.dpid]
+
+        if (link.src.dpid, link.src.port_no) in self.is_blocked:
+            self._unblock_port(datapath, link.src.port_no)
+        if (link.dst.dpid, link.dst.port_no) in self.is_blocked:
+            self._unblock_port(self.datapaths[link.dst.dpid], link.dst.port_no)
+
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        actions = [parser.OFPActionOutput(link.src.port_no)]
+        self.add_flow(datapath=datapath,
+                      priority=100,
+                      match=match,
+                      actions=actions)
+
     def on_detect_congestion(self, datapath, port, delta=None):
-        # TODO: Drop or Re-route
+        # TODO: Re-route
         self.logger.info(
-            f"Detect congestion: datapath = {datapath.id}, port = {port}, delta = {delta}")
+            f"Detect congestion: datapath = {datapath.id}, port = {port}, delta = {delta}"
+        )
         if len(self.datapath_port_stats[datapath.id]) == 0:
             return
-        flow = max(
+        _, (match, byte_count) = max(
             [(k, v)
              for (k, v) in self.datapath_port_stats[datapath.id].items()
              if v[0]['in_port'] == port],
             key=lambda x: x[1][1])
-        self.drop_packets(datapath, 100, flow[1][0])
+        # Do nothing if the flow has already be re-routed.
+        if str(match) in self.rerouted_flow:
+            return
+
+        src = self._trace(datapath.id, match['eth_src'])
+        dst = self._trace(datapath.id, match['eth_dst'])
+        primary_path = self.primary_spanning_tree.find_path(src, dst)
+        assert primary_path is not None
+        self._add_backup_edges()
+        secondary_path = self.secondary_spanning_tree.find_path(src, dst)
+        assert secondary_path is not None
+        has_alternative = False
+        for link, is_backup in secondary_path:
+            if not is_backup:
+                has_alternative = True
+                self._reroute(link, match)
+        if not has_alternative:
+            self.logger.info(f"Drop flow: {match}")
+            self._drop_packets(datapath=datapath, priority=100, match=match)
+        else:
+            self.logger.info(f"Reroute flow: {match}")
+            self.rerouted_flow.add(str(match))
 
     def monitor(self):
         SLEEP_SECS = 2
         CONGESTION_THRESHOLD = SLEEP_SECS * 1024 * 1024
         while True:
-            for datapath in self.datapaths:
+            for (_, datapath) in self.datapaths.items():
                 parser = datapath.ofproto_parser
                 datapath.send_msg(parser.OFPFlowStatsRequest(datapath))
                 datapath.send_msg(parser.OFPPortStatsRequest(datapath))
@@ -355,15 +481,18 @@ class Switch(app_manager.RyuApp):
                 if (dp, match) not in new_flow_stats:
                     if dp in self.datapath_port_stats and match in self.datapath_port_stats[
                             dp]:
-                        del self.data_port_stats[dp][match]
+                        del self.datapath_port_stats[dp][match]
             for datapath, stats in self.datapath_port_stats.items():
                 for port, g in itertools.groupby(stats.items(),
                                                  lambda x: x[1][0]['in_port']):
                     delta_sum = sum(x[1][1] for x in g)
                     if delta_sum > CONGESTION_THRESHOLD:
-                        datapath_obj = next(x for x in self.datapaths
-                                            if x.id == datapath)
-                        self.on_detect_congestion(datapath_obj, port, delta_sum)
+                        datapath_obj = next(y
+                                            for (x,
+                                                 y) in self.datapaths.items()
+                                            if x == datapath)
+                        self.on_detect_congestion(datapath_obj, port,
+                                                  delta_sum)
             self.prev_flow_stats = new_flow_stats
             self._print_table(rows)
             columns = [
