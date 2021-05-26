@@ -391,10 +391,12 @@ class Switch(app_manager.RyuApp):
             return dp, port
         return self._trace(dst, eth)
 
+    # Insert edges in the primary spanning tree to make the secondary one connected.
     def _add_backup_edges(self):
         for link in self.tree_edges:
             self.secondary_spanning_tree.merge(link, True)
 
+    # Extract all fields in `match` except `in_port`.
     def _get_match_fields(self, match):
         args = {}
 
@@ -407,6 +409,7 @@ class Switch(app_manager.RyuApp):
                 args[key] = match[key]
         return args
 
+    # Copy all fields in `match` and replace `match['in_port']` with `in_port`.
     def _copy_match(self, match, in_port, parser):
         args = self._get_match_fields(match)
         args['in_port'] = in_port
@@ -427,28 +430,30 @@ class Switch(app_manager.RyuApp):
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
 
-        self.logger.info(
+        self.logger.debug(
             f"_reroute link = {link}, match = {match}, in_port = {in_port}")
 
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         new_match = self._copy_match(match, in_port, parser)
 
+        # Drop packets first to prevent incorrect flood that breaks `self.mac_to_ports`.
         self._drop_packets(datapath=datapath, priority=50, match=new_match)
 
+        # Unblock ports if necessary.
         if (link.src.dpid, link.src.port_no) in self.is_blocked:
             self._unblock_port(datapath, link.src.port_no)
         if (link.dst.dpid, link.dst.port_no) in self.is_blocked:
             self._unblock_port(self.datapaths[link.dst.dpid], link.dst.port_no)
 
         self.logger.info(f'Re-routing match = {new_match}')
-        # print(f'Re-routing match = {new_match}')
         actions = [parser.OFPActionOutput(link.src.port_no)]
         self.add_flow(datapath=datapath,
                       priority=100,
                       match=new_match,
                       actions=actions)
         if not is_tree_edge:
+            # Disable broadcasting packets through ports on the secondary spanning tree.
             self._drop_broadcast(link.src.dpid, link.src.port_no)
             self._drop_broadcast(link.dst.dpid, link.dst.port_no)
 
@@ -460,6 +465,7 @@ class Switch(app_manager.RyuApp):
 
         self._drop_packets(datapath=datapath, priority=50, match=new_match)
 
+        # Drop packets first to prevent incorrect flood that breaks `self.mac_to_ports`
         if (dpid, dst_port) in self.is_blocked:
             self._unblock_port(datapath, dst_port)
 
@@ -471,12 +477,11 @@ class Switch(app_manager.RyuApp):
                       actions=actions)
 
     def _print_path(self, name, path):
-        self.logger.info(name + " path")
+        self.logger.debug(name + " path")
         for (link, is_backup) in path:
-            self.logger.info(str(link) + " " + str(is_backup))
+            self.logger.debug(str(link) + " " + str(is_backup))
 
     def on_detect_congestion(self, datapath, port, delta=None):
-        # TODO: Re-route
         self.logger.info(
             f"Detect congestion: datapath = {datapath.id}, port = {port}, delta = {delta}"
         )
@@ -487,6 +492,7 @@ class Switch(app_manager.RyuApp):
              for (k, v) in self.datapath_port_stats[datapath.id].items()
              if v[0]['in_port'] == port],
             key=lambda x: x[1][1])
+
         # Do nothing if the flow has already be re-routed.
         key = frozenset(sorted(self._get_match_fields(match).items()))
         if key in self.rerouted_flow:
