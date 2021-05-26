@@ -315,6 +315,11 @@ class Switch(app_manager.RyuApp):
                 priority += 1
         match = parser.OFPMatch(**args)
 
+        # Fuck ipv6 packets
+        ipv6_pkt = pkt.get_protocol(ipv6.ipv6)
+        if ipv6_pkt:
+            return
+
         # Don't log noisy ipv6 broadcast packets.
         if not src.startswith("33:33:") and not dst.startswith("33:33:"):
             self.logger.info("packet in %s %s %s %s, matching %s", dpid, src,
@@ -325,8 +330,10 @@ class Switch(app_manager.RyuApp):
 
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
+            self.logger.info(f"out_port = {out_port}")
         else:
             out_port = ofproto.OFPP_FLOOD
+            self.logger.info("FLOOD")
 
         actions = [parser.OFPActionOutput(out_port)]
 
@@ -508,11 +515,9 @@ class Switch(app_manager.RyuApp):
             self._reroute_end(dst_port, dst, match, in_port)
         if not has_alternative or self.congestion_action == "drop":
             self.logger.info(f"Drop flow: {match}")
-            print(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath, priority=100, match=match)
         else:
             self.logger.info(f"Reroute flow: {match}")
-            print(f"Reroute flow: {match}")
             self.rerouted_flow.add(key)
 
     def monitor(self):
