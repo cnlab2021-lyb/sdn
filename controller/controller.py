@@ -122,7 +122,9 @@ class Switch(app_manager.RyuApp):
         self.rerouted_flow = set()
         CONF = cfg.CONF
         CONF.register_opts([
-            cfg.StrOpt('congestion', default='drop', help=('Action when detecting congestion'))
+            cfg.StrOpt('congestion',
+                       default='drop',
+                       help=('Action when detecting congestion'))
         ])
         self.congestion_action = CONF.congestion
         assert self.congestion_action in ['drop', 'reroute']
@@ -219,7 +221,7 @@ class Switch(app_manager.RyuApp):
     def _unblock_port(self, datapath, port_no):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        config = ofproto.OFPPC_NO_PACKET_IN
+        config = 0
         msg = parser.OFPPortMod(datapath=datapath,
                                 port_no=port_no,
                                 config=config,
@@ -313,6 +315,7 @@ class Switch(app_manager.RyuApp):
                 priority += 1
         match = parser.OFPMatch(**args)
 
+        # Don't log noisy ipv6 broadcast packets.
         if not src.startswith("33:33:") and not dst.startswith("33:33:"):
             self.logger.info("packet in %s %s %s %s, matching %s", dpid, src,
                              dst, in_port, str(match))
@@ -387,31 +390,38 @@ class Switch(app_manager.RyuApp):
         for link in self.tree_edges:
             self.secondary_spanning_tree.merge(link, True)
 
-    @staticmethod
-    def _get_match_fields(match):
+    def _get_match_fields(self, match):
         args = {}
 
         for key in [
-                'eth_src', 'eth_dst', 'eth_type', 'ip_proto', 'ipv4_src', 'ipv4_dst', 'ipv6_src', 'ipv6_dst',
-                'arp_spa', 'arp_tpa', 'tcp_src', 'tcp_dst', 'udp_src',
-                'udp_dst'
+                'eth_src', 'eth_dst', 'eth_type', 'ip_proto', 'ipv4_src',
+                'ipv4_dst', 'ipv6_src', 'ipv6_dst', 'arp_spa', 'arp_tpa',
+                'tcp_src', 'tcp_dst', 'udp_src', 'udp_dst'
         ]:
             if key in match:
                 args[key] = match[key]
         return args
 
-    @staticmethod
-    def _copy_match(match, in_port, parser):
-        args = Switch._get_match_fields(match)
+    def _copy_match(self, match, in_port, parser):
+        args = self._get_match_fields(match)
         args['in_port'] = in_port
         return parser.OFPMatch(**args)
+
+    def _drop_broadcast(self, dpid, port_no):
+        self.logger.info(f"Drop broadcast packets datapath = {dpid}, in_port = {port_no}")
+        datapath = self.datapaths[dpid]
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        args = {'eth_dst': 'ff:ff:ff:ff:ff:ff', 'in_port': port_no}
+        match = parser.OFPMatch(**args)
+        self._drop_packets(datapath=datapath, priority=100, match=match)
 
     def _reroute(self, link, match, in_port, is_tree_edge):
         assert link.src.dpid in self.datapaths
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
 
-        print(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
+        self.logger.info(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
 
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -431,26 +441,12 @@ class Switch(app_manager.RyuApp):
                       priority=100,
                       match=new_match,
                       actions=actions)
-        new_match = parser.OFPMatch()
-        actions = [
-            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                   ofproto.OFPCML_NO_BUFFER)
-        ]
-        self.datapaths[datapath.id] = datapath
-        self.add_flow(datapath, 0, new_match, actions)
         if not is_tree_edge:
-            args = {
-                'eth_dst': 'ff:ff:ff:ff:ff:ff',
-                'in_port': in_port
-            }
-            new_match = parser.OFPMatch(**args)
-            self._drop_packets(datapath=datapath, priority=100, match=match)
+            self._drop_broadcast(link.src.dpid, link.src.port_no)
+            self._drop_broadcast(link.dst.dpid, link.dst.port_no)
 
     def _reroute_end(self, dst_port, dpid, match, in_port):
         datapath = self.datapaths[dpid]
-
-        # print(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
-
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         new_match = self._copy_match(match, in_port, parser)
@@ -461,32 +457,16 @@ class Switch(app_manager.RyuApp):
             self._unblock_port(datapath, dst_port)
 
         self.logger.info(f'Re-routing match = {new_match}')
-        # print(f'Re-routing match = {new_match}')
         actions = [parser.OFPActionOutput(dst_port)]
         self.add_flow(datapath=datapath,
                       priority=100,
                       match=new_match,
                       actions=actions)
-        new_match = parser.OFPMatch()
-        actions = [
-            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                   ofproto.OFPCML_NO_BUFFER)
-        ]
-        self.datapaths[datapath.id] = datapath
-        self.add_flow(datapath, 0, new_match, actions)
-        args = {
-            'eth_dst': 'ff:ff:ff:ff:ff:ff',
-            'in_port': in_port
-        }
-        new_match = parser.OFPMatch(**args)
-        self._drop_packets(datapath=datapath, priority=100, match=match)
 
-    @staticmethod
-    def _print_path(name, path):
-        print(name + " path", end="")
+    def _print_path(self, name, path):
+        self.logger.info(name + " path")
         for (link, is_backup) in path:
-            print(link, is_backup, end=" ")
-        print("")
+            self.logger.info(str(link) + " " + str(is_backup))
 
     def on_detect_congestion(self, datapath, port, delta=None):
         # TODO: Re-route
@@ -501,10 +481,9 @@ class Switch(app_manager.RyuApp):
              if v[0]['in_port'] == port],
             key=lambda x: x[1][1])
         # Do nothing if the flow has already be re-routed.
-        key = frozenset(sorted(Switch._get_match_fields(match)))
+        key = frozenset(sorted(self._get_match_fields(match).items()))
         if key in self.rerouted_flow:
             self.logger.info(f"flow {match} has already been re-routed")
-            print(f"flow {match} has already been re-routed")
             return
 
         src, src_port = self._trace(datapath.id, match['eth_src'])
@@ -519,10 +498,12 @@ class Switch(app_manager.RyuApp):
         has_alternative = False
         if self.congestion_action == "reroute":
             in_port = src_port
+            first = True
             for link, is_backup in secondary_path:
                 if not is_backup:
                     has_alternative = True
                 self._reroute(link, match, in_port, is_backup)
+                first = False
                 in_port = link.dst.port_no
             self._reroute_end(dst_port, dst, match, in_port)
         if not has_alternative or self.congestion_action == "drop":
