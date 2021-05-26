@@ -186,7 +186,7 @@ class Switch(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     # Insert rule to `datapath` that drops flows matching `match`.
-    def _drop_packets(self, datapath, priority, match):
+    def _drop_packets(self, datapath, priority, match, is_modify=False):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -196,7 +196,8 @@ class Switch(app_manager.RyuApp):
                                 priority=priority,
                                 match=match,
                                 instructions=inst,
-                                command=ofproto.OFPFC_ADD)
+                                command=ofproto.OFPFC_ADD
+                                if not is_modify else ofproto.OFPFC_MODIFY)
         datapath.send_msg(msg)
 
     # Block the `port_no`-th port of `datapath`.
@@ -372,6 +373,16 @@ class Switch(app_manager.RyuApp):
             return 'ARP'
         return 'Unknown'
 
+    @staticmethod
+    def _get_priority(match):
+        res = 0
+        res += 'ipv4_src' in match
+        res += 'ipv6_src' in match
+        res += 'arp_spa' in match
+        res += 'tcp_src' in match
+        res += 'udp_src' in match
+        return res
+
     def _print_table(self, rows):
         assert len(rows) >= 1
         lens = [len(x) for x in rows[0]]
@@ -438,7 +449,10 @@ class Switch(app_manager.RyuApp):
         new_match = self._copy_match(match, in_port, parser)
 
         # Drop packets first to prevent incorrect flood that breaks `self.mac_to_ports`.
-        self._drop_packets(datapath=datapath, priority=50, match=new_match)
+        self._drop_packets(datapath=datapath,
+                           priority=self._get_priority(new_match),
+                           match=new_match,
+                           is_modify=True)
 
         # Unblock ports if necessary.
         if (link.src.dpid, link.src.port_no) in self.is_blocked:
@@ -463,7 +477,10 @@ class Switch(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         new_match = self._copy_match(match, in_port, parser)
 
-        self._drop_packets(datapath=datapath, priority=50, match=new_match)
+        self._drop_packets(datapath=datapath,
+                           priority=self._get_priority(new_match),
+                           match=new_match,
+                           is_modify=True)
 
         # Drop packets first to prevent incorrect flood that breaks `self.mac_to_ports`
         if (dpid, dst_port) in self.is_blocked:
@@ -521,7 +538,10 @@ class Switch(app_manager.RyuApp):
             self._reroute_end(dst_port, dst, match, in_port)
         if not has_alternative or self.congestion_action == "drop":
             self.logger.info(f"Drop flow: {match}")
-            self._drop_packets(datapath=datapath, priority=100, match=match)
+            self._drop_packets(datapath=datapath,
+                               priority=self._get_priority(match),
+                               match=match,
+                               is_modify=True)
         else:
             self.logger.info(f"Reroute flow: {match}")
             self.rerouted_flow.add(key)
@@ -537,7 +557,8 @@ class Switch(app_manager.RyuApp):
             hub.sleep(SLEEP_SECS)
             columns = [
                 'datapath', 'in-port', 'src-ip', 'src-port', 'dst-ip',
-                'dst-port', 'protocol', 'action', 'packets', 'bytes'
+                'dst-port', 'protocol', 'action', 'packets', 'bytes',
+                'priority'
             ]
             rows = [columns]
             new_flow_stats = {}
@@ -571,7 +592,7 @@ class Switch(app_manager.RyuApp):
                         stat.match.get('tcp_dst',
                                        stat.match.get('udp_dst', '')),
                         self._get_protocol(stat.match), action,
-                        stat.packet_count, stat.byte_count
+                        stat.packet_count, stat.byte_count, stat.priority
                     ])
             for (dp, match) in self.prev_flow_stats:
                 if (dp, match) not in new_flow_stats:

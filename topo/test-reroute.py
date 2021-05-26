@@ -1,5 +1,6 @@
 from mininet.topo import Topo
 
+
 class TestRerouteTopo(Topo):
     def __init__(self, hosts=2):
         Topo.__init__(self)
@@ -12,8 +13,10 @@ class TestRerouteTopo(Topo):
         self.addLink(s1, s3)
         self.addLink(s2, s3)
         h1 = self.addHost('h1')
+        _ = self.addHost('h1-dummy')
         h2 = self.addHost('h2')
         self.addLink(h1, s0)
         self.addLink(h2, s3)
+
 
 topos = {'test-reroute-topo': (lambda: TestRerouteTopo())}
