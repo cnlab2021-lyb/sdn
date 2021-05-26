@@ -196,7 +196,7 @@ class Switch(app_manager.RyuApp):
                                 priority=priority,
                                 match=match,
                                 instructions=inst,
-                                command=ofproto.OFPFC_MODIFY)
+                                command=ofproto.OFPFC_ADD)
         datapath.send_msg(msg)
 
     # Block the `port_no`-th port of `datapath`.
@@ -221,7 +221,7 @@ class Switch(app_manager.RyuApp):
     def _unblock_port(self, datapath, port_no):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        config = 0
+        config = ofproto.OFPPC_NO_PACKET_IN
         msg = parser.OFPPortMod(datapath=datapath,
                                 port_no=port_no,
                                 config=config,
@@ -320,10 +320,8 @@ class Switch(app_manager.RyuApp):
         if ipv6_pkt:
             return
 
-        # Don't log noisy ipv6 broadcast packets.
-        if not src.startswith("33:33:") and not dst.startswith("33:33:"):
-            self.logger.info("packet in %s %s %s %s, matching %s", dpid, src,
-                             dst, in_port, str(match))
+        self.logger.info("packet in %s %s %s %s, matching %s", dpid, src, dst,
+                         in_port, str(match))
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -415,20 +413,22 @@ class Switch(app_manager.RyuApp):
         return parser.OFPMatch(**args)
 
     def _drop_broadcast(self, dpid, port_no):
-        self.logger.info(f"Drop broadcast packets datapath = {dpid}, in_port = {port_no}")
+        self.logger.info(
+            f"Drop broadcast packets datapath = {dpid}, in_port = {port_no}")
         datapath = self.datapaths[dpid]
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         args = {'eth_dst': 'ff:ff:ff:ff:ff:ff', 'in_port': port_no}
         match = parser.OFPMatch(**args)
-        self._drop_packets(datapath=datapath, priority=100, match=match)
+        self._drop_packets(datapath=datapath, priority=200, match=match)
 
     def _reroute(self, link, match, in_port, is_tree_edge):
         assert link.src.dpid in self.datapaths
         assert link.dst.dpid in self.datapaths
         datapath = self.datapaths[link.src.dpid]
 
-        self.logger.info(f"_reroute link = {link}, match = {match}, in_port = {in_port}")
+        self.logger.info(
+            f"_reroute link = {link}, match = {match}, in_port = {in_port}")
 
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
