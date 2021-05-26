@@ -30,6 +30,7 @@ from ryu.lib.packet import arp
 from ryu.lib import hub
 from ryu.topology.event import EventLinkAdd
 from ryu.topology.switches import Link
+from ryu import cfg
 
 
 def reverse_link(link: Link) -> Link:
@@ -119,6 +120,12 @@ class Switch(app_manager.RyuApp):
         self.is_blocked = set()
         self.is_unblocked = set()
         self.rerouted_flow = set()
+        CONF = cfg.CONF
+        CONF.register_opts([
+            cfg.StrOpt('congestion', default='drop', help=('Action when detecting congestion'))
+        ])
+        self.congestion_action = CONF.congestion
+        assert self.congestion_action in ['drop', 'reroute']
 
     @set_ev_cls(EventLinkAdd, MAIN_DISPATCHER)
     def link_add_handler(self, ev):
@@ -509,9 +516,8 @@ class Switch(app_manager.RyuApp):
         secondary_path = self.secondary_spanning_tree.find_path(src, dst)
         assert secondary_path is not None
         self._print_path("secondary", secondary_path)
-        drop = True
         has_alternative = False
-        if not drop:
+        if self.congestion_action == "reroute":
             in_port = src_port
             for link, is_backup in secondary_path:
                 if not is_backup:
@@ -519,7 +525,7 @@ class Switch(app_manager.RyuApp):
                 self._reroute(link, match, in_port, is_backup)
                 in_port = link.dst.port_no
             self._reroute_end(dst_port, dst, match, in_port)
-        if not has_alternative or drop:
+        if not has_alternative or self.congestion_action == "drop":
             self.logger.info(f"Drop flow: {match}")
             print(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath, priority=100, match=match)
