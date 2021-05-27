@@ -529,6 +529,8 @@ class Switch(app_manager.RyuApp):
         for link, is_backup in secondary_path:
             if not is_backup:
                 has_alternative = True
+        if not has_alternative and self.congestion_action == "reroute":
+            return
         if not has_alternative or self.congestion_action == "drop":
             self.logger.info(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath,
