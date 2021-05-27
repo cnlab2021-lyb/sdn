@@ -535,6 +535,7 @@ class Switch(app_manager.RyuApp):
                                priority=self._get_priority(match),
                                match=match,
                                is_modify=True)
+            return
         in_port = src_port
         for link, is_backup in secondary_path:
             self._reroute(link, match, in_port, is_backup)
