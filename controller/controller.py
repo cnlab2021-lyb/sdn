@@ -591,6 +591,7 @@ class Switch(app_manager.RyuApp):
                                            stat.match.get('arp_tpa', ''))),
                         stat.match.get('tcp_dst',
                                        stat.match.get('udp_dst', '')),
+                        'Broadcast' if stat.priority == 200 else
                         self._get_protocol(stat.match), action,
                         stat.packet_count, stat.byte_count, stat.priority
                     ])
