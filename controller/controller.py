@@ -526,25 +526,22 @@ class Switch(app_manager.RyuApp):
         assert secondary_path is not None
         self._print_path("secondary", secondary_path)
         has_alternative = False
-        if self.congestion_action == "reroute":
-            in_port = src_port
-            first = True
-            for link, is_backup in secondary_path:
-                if not is_backup:
-                    has_alternative = True
-                self._reroute(link, match, in_port, is_backup)
-                first = False
-                in_port = link.dst.port_no
-            self._reroute_end(dst_port, dst, match, in_port)
+        for link, is_backup in secondary_path:
+            if not is_backup:
+                has_alternative = True
         if not has_alternative or self.congestion_action == "drop":
             self.logger.info(f"Drop flow: {match}")
             self._drop_packets(datapath=datapath,
                                priority=self._get_priority(match),
                                match=match,
                                is_modify=True)
-        else:
-            self.logger.info(f"Reroute flow: {match}")
-            self.rerouted_flow.add(key)
+        in_port = src_port
+        for link, is_backup in secondary_path:
+            self._reroute(link, match, in_port, is_backup)
+            in_port = link.dst.port_no
+        self._reroute_end(dst_port, dst, match, in_port)
+        self.logger.info(f"Reroute flow: {match}")
+        self.rerouted_flow.add(key)
 
     def monitor(self):
         SLEEP_SECS = 2
